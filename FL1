@@ -2,28 +2,130 @@ import pandas as pd
 import numpy as np
 from sklearn.decomposition import PCA
 from sklearn.cluster import KMeans
-from sklearn.mixture import GaussianMixture
+import matplotlib.pyplot as plt
+from rpy2.robjects.packages import importr
+from rpy2.robjects import Formula, r
+from rpy2.robjects.vectors import FloatVector
 
-mcdonalds = pd.read_csv("mcdonalds.csv")
+# Install and import necessary R packages
+utils = importr("utils")
+utils.install_packages("MSA")
+utils.install_packages("flexclust")
+utils.install_packages("flexmix")
+utils.install_packages("partykit")
 
-print(mcdonalds.columns)
-print(mcdonalds.shape)
-print(mcdonalds.head(3))
+MSA = importr("MSA")
+flexclust = importr("flexclust")
+flexmix = importr("flexmix")
+partykit = importr("partykit")
 
-MD_x = mcdonalds.iloc[:, 1:12].replace("Yes", 1).replace("No", 0)
-MD_x = MD_x.astype(int)
-print(np.round(MD_x.mean(), 2))
+# Load data
+mcdonalds = MSA.mcdonalds
+MD_x = np.matrix(mcdonalds.iloc[:, 0:11])
+MD_x = (MD_x == "Yes").astype(int)
+col_means = np.round(np.mean(MD_x, axis=0), 2)
 
+# PCA
 pca = PCA()
 MD_pca = pca.fit_transform(MD_x)
-print(pca.explained_variance_ratio_)
-print(pca.singular_values_)
+MD_pca_summary = {
+    "Standard deviation": np.round(np.sqrt(pca.explained_variance_), 1),
+    "Proportion of Variance": np.round(pca.explained_variance_ratio_, 2),
+    "Cumulative Proportion": np.round(np.cumsum(pca.explained_variance_ratio_), 2),
+}
 
-kmeans = KMeans(n_clusters=4, random_state=1234)
-kmeans.fit(MD_x)
-print(kmeans.cluster_centers_)
+# Plot PCA projection axes
+flexclust.plot(projAxes(MD_pca))
 
-gmm = GaussianMixture(n_components=4, random_state=1234)
-gmm.fit(MD_x)
-print(gmm.means_)
+# K-means clustering
+np.random.seed(1234)
+D_kmeans = flexclust.stepFlexclust(MD_x, 2, 8, nrep=10, verbose=False)
+MD_km = flexclust.relabel(D_kmeans)
+flexclust.plot(MD_km, xlab="number of segments")
 
+# Bootstrap K-means
+np.random.seed(1234)
+MD_b = flexclust.bootFlexclust(MD_x, 2, 8, nrep=10, nboot=100)
+flexclust.plot(MD_b, xlab="number of segments", ylab="adjusted Rand index")
+flexclust.histogram(MD_km.rx2("4"), data=MD_x, xlim=[0, 1])
+
+# Perform hierarchical clustering and stability selection
+MD_hclust = partykit.hclust(partykit.dist(t(MD_x)))
+flexclust.barchart(MD_km.rx2("4"), shade=True, which=MD_hclust.rx2("order")[::-1])
+flexclust.plot(
+    MD_km.rx2("4"),
+    project=MD_pca,
+    data=MD_x,
+    hull=False,
+    simlines=False,
+    xlab="principal component 1",
+    ylab="principal component 2",
+)
+flexclust.projAxes(MD_pca)
+
+# Flexmix model
+MD_m = flexmix.stepFlexmix(
+    Formula("MD_x ~ 1"),
+    k=2,
+    nrep=10,
+    model=flexmix.FLXMCmvbinary(),
+    verbose=False,
+)
+flexclust.plot(MD_m, ylab="value of information criteria (AIC, BIC, ICL)")
+
+# Get K-means and Flexmix clusters
+kmeans_clusters = flexclust.clusters(MD_km)
+mixture_clusters = flexclust.clusters(MD_m)
+cluster_table = pd.DataFrame(
+    {"kmeans": np.array(kmeans_clusters), "mixture": np.array(mixture_clusters)}
+)
+
+# Refit Flexmix model
+MD_reg2 = flexmix.stepFlexmix(
+    Formula("f"),
+    data=mcdonalds,
+    k=2,
+    nrep=10,
+    verbose=False,
+)
+MD_ref2 = flexmix.refit(MD_reg2)
+flexmix.summary(MD_ref2)
+
+# Decision tree
+tree_formula = Formula("factor(k4 == 3) ~ Like.n + Age + VisitFrequency + Gender")
+tree_data = pd.concat(
+    [
+        pd.DataFrame(mcdonalds["Like.n"]),
+        mcdonalds[["Age", "VisitFrequency", "Gender"]],
+    ],
+    axis=1,
+)
+tree_data.columns = ["Like.n", "Age", "VisitFrequency.f", "Gender.f"]
+tree_data = r.assign(tree_data=tree_data)
+tree = partykit.ctree(tree_formula, data=tree_data)
+partykit.plot(tree)
+
+# Additional analysis
+visit = pd.Series(mcdonalds["VisitFrequency"]).groupby(kmeans_clusters).mean()
+like = pd.Series(mcdonalds["Like.n"]).groupby(kmeans_clusters).mean()
+female = (
+    pd.Series((mcdonalds["Gender"] == "Female")).astype(int).groupby(kmeans_clusters).mean()
+)
+
+# Scatter plot
+plt.scatter(
+    visit,
+    like,
+    s=10 * female,
+    c=kmeans_clusters,
+    cmap="viridis",
+    alpha=0.8,
+)
+plt.xlim(2, 4.5)
+plt.ylim(-3, 3)
+for i, label in enumerate(np.arange(1, 5)):
+    plt.text(visit[i], like[i], label)
+
+plt.xlabel("Average Visit Frequency")
+plt.ylabel("Average Like Score")
+plt.show()

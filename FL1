@@ -1,0 +1,29 @@
+import pandas as pd
+import numpy as np
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+from sklearn.mixture import GaussianMixture
+
+mcdonalds = pd.read_csv("mcdonalds.csv")
+
+print(mcdonalds.columns)
+print(mcdonalds.shape)
+print(mcdonalds.head(3))
+
+MD_x = mcdonalds.iloc[:, 1:12].replace("Yes", 1).replace("No", 0)
+MD_x = MD_x.astype(int)
+print(np.round(MD_x.mean(), 2))
+
+pca = PCA()
+MD_pca = pca.fit_transform(MD_x)
+print(pca.explained_variance_ratio_)
+print(pca.singular_values_)
+
+kmeans = KMeans(n_clusters=4, random_state=1234)
+kmeans.fit(MD_x)
+print(kmeans.cluster_centers_)
+
+gmm = GaussianMixture(n_components=4, random_state=1234)
+gmm.fit(MD_x)
+print(gmm.means_)
+
